@@ -468,10 +468,10 @@ class BucketManager:
                 b for b in all_buckets
                 if {d.lower() for d in b["metadata"].get("domain", [])} & filter_set
             ]
-            # Fall back to full search if pre-filter yields nothing
-            # 预筛为空则回退全量搜索
+            # domain specified but no match → return empty (strict isolation)
+            # 指定了 domain 但无匹配 → 返回空列表（严格隔间）
             if not candidates:
-                candidates = all_buckets
+                return []
         else:
             candidates = all_buckets
 

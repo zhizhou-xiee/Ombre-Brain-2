@@ -554,9 +554,11 @@ async def breath(
 
         # --- Pinned/protected buckets: always surface as core principles ---
         # --- 钉选桶：作为核心准则，始终浮现 ---
+        domain_set = {d.strip().lower() for d in domain.split(",") if d.strip()} if domain else set()
         pinned_buckets = [
             b for b in all_buckets
-            if b["metadata"].get("pinned") or b["metadata"].get("protected")
+            if (b["metadata"].get("pinned") or b["metadata"].get("protected"))
+            and (not domain_set or {d.lower() for d in b["metadata"].get("domain", [])} & domain_set)
         ]
         pinned_results = []
         for b in pinned_buckets:
@@ -576,6 +578,7 @@ async def breath(
             and b["metadata"].get("type") not in ("permanent", "feel")
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
+            and (not domain_set or {d.lower() for d in b["metadata"].get("domain", [])} & domain_set)
         ]
 
         logger.info(
@@ -706,6 +709,8 @@ async def breath(
             if bucket_id not in matched_ids and sim_score > 0.5:
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket and not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
+                    if domain_filter and not ({d.lower() for d in bucket["metadata"].get("domain", [])} & {d.lower() for d in domain_filter}):
+                        continue
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
                     matches.append(bucket)
