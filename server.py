@@ -419,6 +419,89 @@ async def dream_hook(request):
 
 
 # =============================================================
+# /grow-hook endpoint: digest content and force-inject domain
+# grow-hook：拆分内容并强制注入指定 domain
+#
+# POST JSON: {"content": "...", "domain": "xiezhijiang"}
+# Whitelist: only domains in _GROW_HOOK_DOMAIN_WHITELIST are accepted.
+# Internally calls dehydrator.digest() then _merge_or_create() for
+# each item, overriding the AI-assigned domain with the caller's domain.
+# =============================================================
+_GROW_HOOK_DOMAIN_WHITELIST = {"xiezhijiang"}
+
+
+@mcp.custom_route("/grow-hook", methods=["POST"])
+async def grow_hook(request):
+    from starlette.responses import JSONResponse
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    content = (body.get("content") or "").strip()
+    domain_raw = (body.get("domain") or "").strip().lower()
+
+    if not content:
+        return JSONResponse({"error": "content is required"}, status_code=400)
+    if not domain_raw:
+        return JSONResponse({"error": "domain is required"}, status_code=400)
+    if domain_raw not in _GROW_HOOK_DOMAIN_WHITELIST:
+        return JSONResponse({"error": f"domain '{domain_raw}' not allowed"}, status_code=403)
+
+    domain = [domain_raw]
+    await decay_engine.ensure_started()
+
+    # Short content fast path (< 30 chars): skip digest, analyze only
+    if len(content) < 30:
+        try:
+            analysis = await dehydrator.analyze(content)
+        except Exception:
+            analysis = {"valence": 0.5, "arousal": 0.3, "tags": [], "suggested_name": "", "importance": 5}
+        result_name, is_merged = await _merge_or_create(
+            content=content,
+            tags=analysis.get("tags", []),
+            importance=analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5,
+            domain=domain,
+            valence=analysis.get("valence", 0.5),
+            arousal=analysis.get("arousal", 0.3),
+            name=analysis.get("suggested_name", ""),
+        )
+        return JSONResponse({
+            "ok": True, "domain": domain_raw,
+            "results": [{"action": "merged" if is_merged else "created", "name": result_name}],
+        })
+
+    # Full digest path: split into items, force domain on each
+    try:
+        items = await dehydrator.digest(content)
+    except Exception as e:
+        logger.error(f"grow-hook digest failed: {e}")
+        return JSONResponse({"error": f"digest failed: {e}"}, status_code=500)
+
+    if not items:
+        return JSONResponse({"error": "digest returned no items"}, status_code=500)
+
+    results = []
+    for item in items:
+        try:
+            result_name, is_merged = await _merge_or_create(
+                content=item["content"],
+                tags=item.get("tags", []),
+                importance=item.get("importance", 5),
+                domain=domain,  # force caller's domain, ignore AI-assigned domain
+                valence=item.get("valence", 0.5),
+                arousal=item.get("arousal", 0.3),
+                name=item.get("name", ""),
+            )
+            results.append({"action": "merged" if is_merged else "created", "name": result_name})
+        except Exception as e:
+            logger.warning(f"grow-hook item failed: {item.get('name', '?')}: {e}")
+            results.append({"action": "error", "name": item.get("name", "?"), "detail": str(e)})
+
+    return JSONResponse({"ok": True, "domain": domain_raw, "results": results})
+
+
+# =============================================================
 # Internal helper: merge-or-create
 # 内部辅助：检查是否可合并，可以则合并，否则新建
 # Shared by hold and grow to avoid duplicate logic
