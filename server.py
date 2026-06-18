@@ -325,14 +325,20 @@ async def breath_hook(request):
     from starlette.responses import PlainTextResponse
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
+        # domain filter from query param (same logic as breath tool)
+        domain_param = request.query_params.get("domain", "").strip()
+        domain_set = {d.strip().lower() for d in domain_param.split(",") if d.strip()} if domain_param else set()
         # pinned
-        pinned = [b for b in all_buckets if b["metadata"].get("pinned") or b["metadata"].get("protected")]
-        # top 2 unresolved by score
+        pinned = [b for b in all_buckets
+                  if (b["metadata"].get("pinned") or b["metadata"].get("protected"))
+                  and (not domain_set or {d.lower() for d in b["metadata"].get("domain", [])} & domain_set)]
+        # top N unresolved by score
         unresolved = [b for b in all_buckets
                       if not b["metadata"].get("resolved", False)
                       and b["metadata"].get("type") not in ("permanent", "feel")
                       and not b["metadata"].get("pinned")
-                      and not b["metadata"].get("protected")]
+                      and not b["metadata"].get("protected")
+                      and (not domain_set or {d.lower() for d in b["metadata"].get("domain", [])} & domain_set)]
         scored = sorted(unresolved, key=lambda b: decay_engine.calculate_score(b["metadata"]), reverse=True)
 
         parts = []
