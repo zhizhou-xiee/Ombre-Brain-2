@@ -427,7 +427,8 @@ async def dream_hook(request):
 # Internally calls dehydrator.digest() then _merge_or_create() for
 # each item, overriding the AI-assigned domain with the caller's domain.
 # =============================================================
-_GROW_HOOK_DOMAIN_WHITELIST = {"xiezhijiang"}
+_raw_whitelist = os.environ.get("GROW_HOOK_ALLOWED_DOMAINS", "xiezhijiang")
+_GROW_HOOK_DOMAIN_WHITELIST = {d.strip() for d in _raw_whitelist.split(",") if d.strip()}
 
 
 @mcp.custom_route("/grow-hook", methods=["POST"])
