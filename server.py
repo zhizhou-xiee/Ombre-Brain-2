@@ -473,14 +473,38 @@ async def grow_hook(request):
         })
 
     # Full digest path: split into items, force domain on each
+    # digest 失败或返回空 → 降级走 analyze()，保底写入，打上"降级"标签方便dashboard筛出
+    # digest fails or returns empty → fall back to analyze(), write anyway,
+    # tag "降级" so it's visible/filterable on the dashboard instead of silently lost.
     try:
         items = await dehydrator.digest(content)
+        if not items:
+            raise ValueError("digest returned no items")
     except Exception as e:
-        logger.error(f"grow-hook digest failed: {e}")
-        return JSONResponse({"error": f"digest failed: {e}"}, status_code=500)
-
-    if not items:
-        return JSONResponse({"error": "digest returned no items"}, status_code=500)
+        logger.warning(f"grow-hook digest failed, falling back to analyze / digest失败降级为analyze: {e}")
+        try:
+            analysis = await dehydrator.analyze(content)
+        except Exception as e2:
+            logger.error(f"grow-hook fallback analyze also failed: {e2}")
+            analysis = {"valence": 0.5, "arousal": 0.3, "tags": [], "suggested_name": "", "importance": 5}
+        fallback_tags = list(set(analysis.get("tags", []) + ["降级"]))
+        try:
+            result_name, is_merged = await _merge_or_create(
+                content=content,
+                tags=fallback_tags,
+                importance=analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5,
+                domain=domain,
+                valence=analysis.get("valence", 0.5),
+                arousal=analysis.get("arousal", 0.3),
+                name=analysis.get("suggested_name", ""),
+            )
+            return JSONResponse({
+                "ok": True, "domain": domain_raw, "degraded": True,
+                "results": [{"action": "merged" if is_merged else "created", "name": result_name, "degraded": True}],
+            })
+        except Exception as e3:
+            logger.error(f"grow-hook fallback write also failed: {e3}")
+            return JSONResponse({"error": f"fallback write failed: {e3}"}, status_code=500)
 
     results = []
     for item in items:
@@ -1955,15 +1979,37 @@ async def api_import_review(request):
             continue
         try:
             if action == "important":
-                await bucket_mgr.update(bid, importance=9)
+                updated = await bucket_mgr.update(bid, importance=9)
+                if not updated:
+                    logger.warning(f"Review update: bucket not found / 未找到: {bid}")
+                    errors += 1
+                    continue
             elif action == "pin":
-                await bucket_mgr.update(bid, pinned=True)
+                updated = await bucket_mgr.update(bid, pinned=True)
+                if not updated:
+                    logger.warning(f"Review update: bucket not found / 未找到: {bid}")
+                    errors += 1
+                    continue
             elif action == "noise":
-                await bucket_mgr.update(bid, resolved=True, importance=1)
+                updated = await bucket_mgr.update(bid, resolved=True, importance=1)
+                if not updated:
+                    logger.warning(f"Review update: bucket not found / 未找到: {bid}")
+                    errors += 1
+                    continue
             elif action == "delete":
-                file_path = bucket_mgr._find_bucket_file(bid)
-                if file_path:
-                    os.remove(file_path)
+                deleted = await bucket_mgr.delete(bid)
+                if not deleted:
+                    logger.warning(f"Review delete: bucket not found / 未找到: {bid}")
+                    errors += 1
+                    continue
+                try:
+                    embedding_engine.delete_embedding(bid)
+                except Exception as e:
+                    logger.warning(f"Review delete: embedding cleanup failed for {bid}: {e}")
+            else:
+                logger.warning(f"Review action unknown: {action} for {bid}")
+                errors += 1
+                continue
             applied += 1
         except Exception as e:
             logger.warning(f"Review action failed for {bid}: {e}")
